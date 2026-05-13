@@ -30,10 +30,30 @@ labeled dataset and reporting accuracy, agreement, and failure cases.
 pip install -r requirements.txt
 ```
 
-## Usage
+## Quick Start
+
+Analyze one audio file:
 
 ```bash
 python3 spectrum_template_analyzer.py path/to/audio.wav
+```
+
+Batch analyze a directory:
+
+```bash
+python3 batch_analyze_spectrum.py path/to/audio_folder
+```
+
+This writes:
+
+```text
+path/to/audio_folder/spectrum_classification_results.csv
+path/to/audio_folder/spectrum_classification_summary.json
+```
+
+## Single File Usage
+
+```bash
 python3 spectrum_template_analyzer.py path/to/audio.mp3 --sr 44100 --top-db 35
 ```
 
@@ -46,6 +66,40 @@ Common options:
 --top-db 40                Silence trimming threshold. Default: 40
 --no-trim                  Disable silence trimming
 --peak-prominence-db 6     Peak prominence threshold in dB. Default: 6
+```
+
+## Batch Usage
+
+Run over all supported audio files in a directory:
+
+```bash
+python3 batch_analyze_spectrum.py downloads/reconstruct_audio
+```
+
+Run recursively:
+
+```bash
+python3 batch_analyze_spectrum.py downloads/reconstruct_audio --recursive
+```
+
+Write outputs to custom paths:
+
+```bash
+python3 batch_analyze_spectrum.py downloads/reconstruct_audio \
+  --output-csv results.csv \
+  --summary-json summary.json
+```
+
+Analyze only the first few files while testing:
+
+```bash
+python3 batch_analyze_spectrum.py downloads/reconstruct_audio --limit 5
+```
+
+Supported default extensions:
+
+```text
+.wav, .mp3, .flac, .m4a, .aac, .aiff, .aif
 ```
 
 ## What It Computes
@@ -66,7 +120,7 @@ Frequency bands:
 | sib | 8k-12k Hz |
 | air | 12k-20k Hz |
 
-For each band, it computes RMS energy across the matching STFT bins.
+For each band, it computes summed power energy across the matching STFT bins.
 
 It then computes:
 
@@ -103,6 +157,15 @@ The command prints a JSON dict:
 The real output also includes `band_energies`, `group_ratios`, sample-rate
 metadata, and detailed classification hit rules.
 
+Batch output CSV includes one row per audio file with:
+
+- file path and filename
+- selected classification label
+- all band ratios
+- `body_to_presence`
+- `peakiness_upper` and `peakiness_harsh`
+- template hit counts and matched rule names
+
 ## Classification Rules
 
 Classification rules live near the top of
@@ -116,9 +179,9 @@ Current behavior:
 - If hits tie, choose the one with more strong-rule hits.
 - If still tied, return `undetermined`.
 
-The default thresholds are placeholders for practical tuning. Replace the
-values in `CLASSIFICATION_RULES` with the exact GPT threshold rules you want to
-use.
+The thresholds are intentionally explicit and easy to tune. Adjust the values
+in `CLASSIFICATION_RULES` for your product, vocal model, genre, language, or
+mixing style.
 
 ## Notes
 
@@ -126,6 +189,8 @@ use.
 - If you use `--sr 22050`, frequencies above about 11kHz are unavailable.
 - Silence trimming is intentionally simple; for full vocal-only analysis, run
   the script on an isolated vocal stem or a clipped vocal section.
+- `.gitignore` excludes local audio, Excel files, generated downloads, caches,
+  and batch reports so large/private files are not committed by accident.
 
 ## Batch Download Reconstruct Audio
 

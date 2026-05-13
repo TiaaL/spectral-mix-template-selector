@@ -1,13 +1,27 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Downloaded/reconstructed audio and generated manifests/results
-/downloads/reconstruct_audio/*.wav
-/downloads/reconstruct_audio/*.mp3
-/downloads/reconstruct_audio/*.flac
-/downloads/reconstruct_audio/*.m4a
-/downloads/reconstruct_audio/*.aac
-/downloads/reconstruct_audio/*.ogg
-/downloads/reconstruct_audio/*.csv
-/batch_results.csv
+.venv/
+venv/
+env/
+
+# Local audio/data artifacts. Keep real datasets out of GitHub.
+downloads/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.aif
+*.aiff
+*.xlsx
+
+# Generated reports.
+batch_results.csv
+spectrum_classification_results.csv
+spectrum_classification_summary.json
+download_manifest.csv
