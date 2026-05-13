@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Downloaded/reconstructed audio and generated manifests/results
+/downloads/reconstruct_audio/*.wav
+/downloads/reconstruct_audio/*.mp3
+/downloads/reconstruct_audio/*.flac
+/downloads/reconstruct_audio/*.m4a
+/downloads/reconstruct_audio/*.aac
+/downloads/reconstruct_audio/*.ogg
+/downloads/reconstruct_audio/*.csv
+/batch_results.csv
