@@ -164,7 +164,7 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
 
     a = results["template_A"]
     b = results["template_B"]
-    label = "undetermined"
+    label = "template_A"
 
     # Decisive override: a real harsh spike outranks body-heavy / band-limited
     # evidence — de-essing the spike is always the priority when one exists.

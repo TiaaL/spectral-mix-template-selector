@@ -177,7 +177,8 @@ Current behavior:
 - A template qualifies when it hits at least 2 rules.
 - If both templates qualify, choose the one with more hits.
 - If hits tie, choose the one with more strong-rule hits.
-- If still tied, return `undetermined`.
+- If neither template qualifies, or both templates are still tied, default to
+  `template_A`.
 
 The thresholds are intentionally explicit and easy to tune. Adjust the values
 in `CLASSIFICATION_RULES` for your product, vocal model, genre, language, or
