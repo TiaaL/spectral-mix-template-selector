@@ -157,6 +157,23 @@ The command prints a JSON dict:
 The real output also includes `band_energies`, `group_ratios`, sample-rate
 metadata, and detailed classification hit rules.
 
+It also reports source-bandwidth info so band-limited inputs do not silently
+skew ratios:
+
+```json
+{
+  "sample_rate": 44100,
+  "native_sample_rate": 24000,
+  "effective_nyquist_hz": 12000.0,
+  "dropped_bands": ["air"]
+}
+```
+
+Any band whose lower edge sits above `effective_nyquist_hz` is dropped from
+the denominator, and any band partially above it is clipped — so a 24 kHz
+source upsampled to 44.1 kHz no longer has its empty `air` band inflating
+all other ratios.
+
 Batch output CSV includes one row per audio file with:
 
 - file path and filename
@@ -171,14 +188,29 @@ Batch output CSV includes one row per audio file with:
 Classification rules live near the top of
 `spectrum_template_analyzer.py` in `CLASSIFICATION_RULES`.
 
-Current behavior:
+Templates:
 
-- Count how many rules each template satisfies.
-- A template qualifies when it hits at least 2 rules.
-- If both templates qualify, choose the one with more hits.
-- If hits tie, choose the one with more strong-rule hits.
-- If neither template qualifies, or both templates are still tied, default to
-  `template_A`.
+| Label | Name | Targets |
+| --- | --- | --- |
+| template_A | Muddy / Boxy Vocal | 厚、闷、糊、鼻、箱感、主体偏暗 |
+| template_B | Peaky / Harsh Vocal | 炸、刺、硬、毛、金属感、某些字突然冲 |
+| template_C | Imbalanced / Heavy Low-Mid | 闷、糊、头重脚轻、缺高频、不通透 |
+
+`template_C` covers severe spectral imbalance — extreme low-mid energy
+combined with starved upper/harsh bands — a state too broken to treat as
+ordinary muddy (A) or peaky (B).
+
+Decision flow (top wins):
+
+1. If `peakiness_harsh >= 12 dB`, choose `template_B` — a real harsh spike
+   always takes priority (de-ess before anything else).
+2. Else if `template_C` qualifies (≥ 2 hits), choose `template_C` — severe
+   imbalance outranks the hollow/boxy and ordinary muddy paths.
+3. Else if the vocal has sparse low foundation below ~200 Hz but a crowded
+   low-mid/body, choose `template_B`.
+4. Else compare `template_A` vs `template_B`: prefer the one that qualifies,
+   then more hits, then more strong-rule hits.
+5. If nothing qualifies, default to `template_A`.
 
 The thresholds are intentionally explicit and easy to tune. Adjust the values
 in `CLASSIFICATION_RULES` for your product, vocal model, genre, language, or
@@ -188,6 +220,9 @@ mixing style.
 
 - Default sample rate is `44100`, so the `air` band can cover up to 20kHz.
 - If you use `--sr 22050`, frequencies above about 11kHz are unavailable.
+- If the source file's native sample rate is below the target (e.g. a 24 kHz
+  wav loaded with `--sr 44100`), bands above the source Nyquist are dropped
+  automatically and reported in `dropped_bands`.
 - Silence trimming is intentionally simple; for full vocal-only analysis, run
   the script on an isolated vocal stem or a clipped vocal section.
 - `.gitignore` excludes local audio, Excel files, generated downloads, caches,

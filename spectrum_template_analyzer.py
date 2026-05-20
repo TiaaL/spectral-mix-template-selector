@@ -34,6 +34,13 @@ PEAKINESS_NOISE_FLOOR_RATIO = 0.02
 # "de-ess before de-mud" is the perceptual priority.
 DECISIVE_HARSH_PEAK_DB = 12.0
 
+# Treat vocals with little energy below ~200Hz but a crowded 180Hz-1kHz body as
+# a separate problem. They are not truly "thick"; they are hollow/boxy and use
+# template_B in the downstream service.
+SPARSE_LOW_FOUNDATION_RATIO = 0.06
+HOLLOW_BOXY_BODY_RATIO = 0.75
+HOLLOW_BOXY_LOWMID_RATIO = 0.35
+
 
 BANDS = OrderedDict(
     [
@@ -65,6 +72,21 @@ CLASSIFICATION_RULES = {
             "strong_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 1.35),
         },
     },
+    "template_C": {
+        "name": "Imbalanced / Heavy Low-Mid",
+        "tags": ["闷", "糊", "头重脚轻", "缺高频", "不通透"],
+        "minimum_hits": 2,
+        "rules": {
+            "extreme_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.55,
+            "very_high_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 5.0),
+            "upper_starved": lambda m: m["ratios"]["upper"] <= 0.06,
+            "no_harsh_energy": lambda m: m["ratios"]["harsh"] <= 0.005,
+        },
+        "strong_rules": {
+            "mega_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.70,
+            "extreme_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 10.0),
+        },
+    },
     "template_B": {
         "name": "Peaky / Harsh Vocal",
         "tags": ["炸", "刺", "硬", "毛", "金属感", "某些字突然冲"],
@@ -75,11 +97,13 @@ CLASSIFICATION_RULES = {
             "sib_ratio_high": lambda m: m["ratios"]["sib"] >= 0.12,
             "upper_peak_spiky": lambda m: m["peakiness_upper"] >= 9.0,
             "harsh_peak_spiky": lambda m: m["peakiness_harsh"] >= 9.0,
+            "hollow_boxy_body_without_lows": lambda m: is_hollow_boxy_body_without_lows(m),
         },
         "strong_rules": {
             "very_spiky_harsh": lambda m: m["peakiness_harsh"] >= 12.0,
             "very_high_harsh_ratio": lambda m: m["ratios"]["harsh"] >= 0.22,
             "very_high_sib_ratio": lambda m: m["ratios"]["sib"] >= 0.18,
+            "very_hollow_boxy_body_without_lows": lambda m: is_hollow_boxy_body_without_lows(m),
         },
     },
 }
@@ -91,6 +115,18 @@ def safe_ge(value: float | None, threshold: float) -> bool:
 
 def safe_le(value: float | None, threshold: float) -> bool:
     return value is not None and value <= threshold
+
+
+def low_foundation_ratio(metrics: dict[str, Any]) -> float:
+    return metrics["ratios"]["sub"] + metrics["ratios"]["low"]
+
+
+def is_hollow_boxy_body_without_lows(metrics: dict[str, Any]) -> bool:
+    return (
+        low_foundation_ratio(metrics) <= SPARSE_LOW_FOUNDATION_RATIO
+        and metrics["group_ratios"]["body"] >= HOLLOW_BOXY_BODY_RATIO
+        and metrics["ratios"]["lowmid"] >= HOLLOW_BOXY_LOWMID_RATIO
+    )
 
 
 def strip_silence(y: np.ndarray, top_db: float) -> np.ndarray:
@@ -164,11 +200,18 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
 
     a = results["template_A"]
     b = results["template_B"]
+    c = results["template_C"]
     label = "template_A"
 
     # Decisive override: a real harsh spike outranks body-heavy / band-limited
     # evidence — de-essing the spike is always the priority when one exists.
     if metrics["peakiness_harsh"] >= DECISIVE_HARSH_PEAK_DB:
+        label = "template_B"
+    elif c["qualified"]:
+        # Severe spectral imbalance (extreme lowmid + starved highs) is its own
+        # problem class — outranks both hollow/boxy→B and ordinary muddy→A.
+        label = "template_C"
+    elif is_hollow_boxy_body_without_lows(metrics):
         label = "template_B"
     elif a["qualified"] and not b["qualified"]:
         label = "template_A"
@@ -190,6 +233,7 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
         "label_name": results[label]["name"] if label in results else None,
         "template_A": results["template_A"],
         "template_B": results["template_B"],
+        "template_C": results["template_C"],
     }
 
 
@@ -203,9 +247,22 @@ def analyze_audio(
     peak_prominence_db: float = 6.0,
 ) -> dict[str, Any]:
     path = Path(audio_path).expanduser()
+    native_sr = int(librosa.get_samplerate(path))
     y, used_sr = librosa.load(path, sr=sr, mono=True)
     if trim:
         y = strip_silence(y, top_db=top_db)
+
+    # A band-limited source (e.g. 24 kHz native upsampled to 44.1 kHz) has no
+    # real content above its own Nyquist. Counting empty high bands in the
+    # denominator inflates low-band ratios and breaks calibrated thresholds.
+    effective_nyquist = min(used_sr, native_sr) / 2.0
+    active_bands: "OrderedDict[str, tuple[float, float]]" = OrderedDict()
+    dropped_bands: list[str] = []
+    for name, (low_hz, high_hz) in BANDS.items():
+        if low_hz >= effective_nyquist:
+            dropped_bands.append(name)
+            continue
+        active_bands[name] = (low_hz, min(high_hz, effective_nyquist))
 
     if hop_length is None:
         hop_length = n_fft // 4
@@ -216,8 +273,10 @@ def analyze_audio(
 
     energies = {
         name: band_power(power, freqs, low_hz, high_hz)
-        for name, (low_hz, high_hz) in BANDS.items()
+        for name, (low_hz, high_hz) in active_bands.items()
     }
+    for name in dropped_bands:
+        energies[name] = 0.0
     total_energy = float(sum(energies.values()))
     ratios = {
         name: (energy / total_energy if total_energy > 0 else 0.0)
@@ -240,15 +299,15 @@ def analyze_audio(
     peakiness_upper = band_peakiness(
         mean_db_spectrum,
         freqs,
-        *BANDS["upper"],
+        *active_bands.get("upper", BANDS["upper"]),
         prominence_db=peak_prominence_db,
-    )
+    ) if "upper" in active_bands else 0.0
     peakiness_harsh = band_peakiness(
         mean_db_spectrum,
         freqs,
-        *BANDS["harsh"],
+        *active_bands.get("harsh", BANDS["harsh"]),
         prominence_db=peak_prominence_db,
-    )
+    ) if "harsh" in active_bands else 0.0
 
     # Noise-floor hygiene: ignore peakiness when its band has no real content,
     # otherwise find_peaks invents spikes from quantization/codec residue.
@@ -260,6 +319,9 @@ def analyze_audio(
     metrics: dict[str, Any] = {
         "audio_path": str(path),
         "sample_rate": used_sr,
+        "native_sample_rate": native_sr,
+        "effective_nyquist_hz": effective_nyquist,
+        "dropped_bands": dropped_bands,
         "n_fft": n_fft,
         "hop_length": hop_length,
         "trim_silence": trim,
