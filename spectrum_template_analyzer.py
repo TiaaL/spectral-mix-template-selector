@@ -62,14 +62,16 @@ CLASSIFICATION_RULES = {
         "name": "Muddy / Boxy Vocal",
         "tags": ["厚", "闷", "糊", "鼻", "箱感", "主体偏暗"],
         "minimum_hits": 2,
+        # in_a_territory gates every rule so A stays mutually exclusive with
+        # C (extreme zone) and B (hollow-boxy zone).
         "rules": {
-            "lowmid_ratio_high": lambda m: m["ratios"]["lowmid"] >= 0.28,
-            "mid_ratio_high": lambda m: m["ratios"]["mid"] >= 0.20,
-            "body_to_presence_high": lambda m: safe_ge(m["body_to_presence"], 1.15),
+            "lowmid_ratio_high": lambda m: m["ratios"]["lowmid"] >= 0.28 and in_a_territory(m),
+            "mid_ratio_high": lambda m: m["ratios"]["mid"] >= 0.20 and in_a_territory(m),
+            "body_to_presence_high": lambda m: safe_ge(m["body_to_presence"], 1.15) and in_a_territory(m),
         },
         "strong_rules": {
-            "very_high_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.34,
-            "strong_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 1.35),
+            "very_high_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.34 and in_a_territory(m),
+            "strong_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 1.35) and in_a_territory(m),
         },
     },
     "template_C": {
@@ -79,8 +81,8 @@ CLASSIFICATION_RULES = {
         "rules": {
             "extreme_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.55,
             "very_high_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 5.0),
-            "upper_starved": lambda m: m["ratios"]["upper"] <= 0.06,
-            "no_harsh_energy": lambda m: m["ratios"]["harsh"] <= 0.005,
+            # Combined: a band-limited top end is one observation, not two.
+            "band_limited_highs": lambda m: m["ratios"]["upper"] <= 0.06 and m["ratios"]["harsh"] <= 0.005,
         },
         "strong_rules": {
             "mega_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.70,
@@ -103,7 +105,6 @@ CLASSIFICATION_RULES = {
             "very_spiky_harsh": lambda m: m["peakiness_harsh"] >= 12.0,
             "very_high_harsh_ratio": lambda m: m["ratios"]["harsh"] >= 0.22,
             "very_high_sib_ratio": lambda m: m["ratios"]["sib"] >= 0.18,
-            "very_hollow_boxy_body_without_lows": lambda m: is_hollow_boxy_body_without_lows(m),
         },
     },
 }
@@ -127,6 +128,21 @@ def is_hollow_boxy_body_without_lows(metrics: dict[str, Any]) -> bool:
         and metrics["group_ratios"]["body"] >= HOLLOW_BOXY_BODY_RATIO
         and metrics["ratios"]["lowmid"] >= HOLLOW_BOXY_LOWMID_RATIO
     )
+
+
+def in_a_territory(metrics: dict[str, Any]) -> bool:
+    """A fires only outside C's extreme zone and outside B's hollow-boxy zone.
+
+    Without this gate A's loose thresholds would steal samples that structurally
+    belong to C (extreme lowmid / body) or B (hollow boxy without lows).
+    """
+    if metrics["ratios"]["lowmid"] >= 0.55:
+        return False
+    if metrics["body_to_presence"] is not None and metrics["body_to_presence"] >= 5.0:
+        return False
+    if is_hollow_boxy_body_without_lows(metrics):
+        return False
+    return True
 
 
 def strip_silence(y: np.ndarray, top_db: float) -> np.ndarray:
@@ -198,35 +214,28 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
             "qualified": len(hits) >= config["minimum_hits"],
         }
 
-    a = results["template_A"]
-    b = results["template_B"]
-    c = results["template_C"]
-    label = "template_A"
-
-    # Decisive override: a real harsh spike outranks body-heavy / band-limited
-    # evidence — de-essing the spike is always the priority when one exists.
+    # Decisive override: a real harsh spike outranks every other signal —
+    # de-essing the spike is always the priority when one exists.
     if metrics["peakiness_harsh"] >= DECISIVE_HARSH_PEAK_DB:
         label = "template_B"
-    elif c["qualified"]:
-        # Severe spectral imbalance (extreme lowmid + starved highs) is its own
-        # problem class — outranks both hollow/boxy→B and ordinary muddy→A.
-        label = "template_C"
-    elif is_hollow_boxy_body_without_lows(metrics):
-        label = "template_B"
-    elif a["qualified"] and not b["qualified"]:
-        label = "template_A"
-    elif b["qualified"] and not a["qualified"]:
-        label = "template_B"
-    elif a["qualified"] and b["qualified"]:
-        # Method 2: any B strong_hit beats A unless A also has strong_hits.
-        if b["strong_hits"] > 0 and a["strong_hits"] == 0:
-            label = "template_B"
-        elif a["strong_hits"] > 0 and b["strong_hits"] == 0:
-            label = "template_A"
-        elif a["hits"] != b["hits"]:
-            label = "template_A" if a["hits"] > b["hits"] else "template_B"
-        elif a["strong_hits"] != b["strong_hits"]:
-            label = "template_A" if a["strong_hits"] > b["strong_hits"] else "template_B"
+    else:
+        # Equal-priority three-way selection.
+        # 1. If exactly one template has any strong_hits, that "smoking gun"
+        #    template wins.
+        # 2. Otherwise rank by (hits, strong_hits); ties break A > B > C.
+        candidates = ["template_A", "template_B", "template_C"]
+        with_strong = [t for t in candidates if results[t]["strong_hits"] > 0]
+        if len(with_strong) == 1:
+            label = with_strong[0]
+        else:
+            label = max(
+                candidates,
+                key=lambda t: (
+                    results[t]["hits"],
+                    results[t]["strong_hits"],
+                    -candidates.index(t),
+                ),
+            )
 
     return {
         "label": label,
