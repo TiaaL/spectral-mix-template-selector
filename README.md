@@ -196,21 +196,24 @@ Templates:
 | template_B | Peaky / Harsh Vocal | 炸、刺、硬、毛、金属感、某些字突然冲 |
 | template_C | Imbalanced / Heavy Low-Mid | 闷、糊、头重脚轻、缺高频、不通透 |
 
-`template_C` covers severe spectral imbalance — extreme low-mid energy
-combined with starved upper/harsh bands — a state too broken to treat as
-ordinary muddy (A) or peaky (B).
+The three templates are designed to be mutually exclusive. `template_A`'s
+rules are gated by `in_a_territory()`, which suppresses A whenever the
+metrics fall into C's extreme zone (`lowmid >= 0.55` or
+`body_to_presence >= 5.0`) or B's hollow-boxy zone (sparse sub/low plus
+crowded body). C therefore owns the extreme low-mid case and B owns the
+hollow-boxy case without A poaching their samples.
 
 Decision flow (top wins):
 
 1. If `peakiness_harsh >= 12 dB`, choose `template_B` — a real harsh spike
    always takes priority (de-ess before anything else).
-2. Else if `template_C` qualifies (≥ 2 hits), choose `template_C` — severe
-   imbalance outranks the hollow/boxy and ordinary muddy paths.
-3. Else if the vocal has sparse low foundation below ~200 Hz but a crowded
-   low-mid/body, choose `template_B`.
-4. Else compare `template_A` vs `template_B`: prefer the one that qualifies,
-   then more hits, then more strong-rule hits.
-5. If nothing qualifies, default to `template_A`.
+2. Otherwise A, B, and C compete as equals on their hit counts:
+   - If exactly one template has any `strong_hits`, that "smoking gun"
+     template wins.
+   - Else rank by `(hits, strong_hits)`; ties break in the order A > B > C.
+
+`minimum_hits` no longer gates label selection — it remains in the JSON
+output as a "qualified" flag for diagnostics.
 
 The thresholds are intentionally explicit and easy to tune. Adjust the values
 in `CLASSIFICATION_RULES` for your product, vocal model, genre, language, or
