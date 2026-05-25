@@ -78,15 +78,18 @@ CLASSIFICATION_RULES = {
         "name": "Imbalanced / Heavy Low-Mid",
         "tags": ["闷", "糊", "头重脚轻", "缺高频", "不通透"],
         "minimum_hits": 2,
+        # in_c_territory (body-dominant + presence-starved + body peakiness)
+        # gates every rule, so C only fires on the full structural pattern.
         "rules": {
-            "extreme_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.55,
-            "very_high_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 5.0),
-            # Combined: a band-limited top end is one observation, not two.
-            "band_limited_highs": lambda m: m["ratios"]["upper"] <= 0.06 and m["ratios"]["harsh"] <= 0.005,
+            "extreme_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.55 and in_c_territory(m),
+            "very_high_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 5.0) and in_c_territory(m),
+            "band_limited_highs": lambda m: m["ratios"]["upper"] <= 0.06 and m["ratios"]["harsh"] <= 0.005 and in_c_territory(m),
+            "body_peak_spiky": lambda m: m["peakiness_upper"] >= C_BODY_PEAK_DB and in_c_territory(m),
         },
         "strong_rules": {
-            "mega_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.70,
-            "extreme_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 10.0),
+            "mega_lowmid": lambda m: m["ratios"]["lowmid"] >= 0.70 and in_c_territory(m),
+            "extreme_body_to_presence": lambda m: safe_ge(m["body_to_presence"], 10.0) and in_c_territory(m),
+            "very_spiky_body_peak": lambda m: m["peakiness_upper"] >= C_BODY_PEAK_STRONG_DB and in_c_territory(m),
         },
     },
     "template_B": {
@@ -130,15 +133,29 @@ def is_hollow_boxy_body_without_lows(metrics: dict[str, Any]) -> bool:
     )
 
 
-def in_a_territory(metrics: dict[str, Any]) -> bool:
-    """A fires only outside C's extreme zone and outside B's hollow-boxy zone.
+C_BODY_DOMINANT_RATIO = 0.70
+C_PRESENCE_STARVED_RATIO = 0.10
+C_BODY_PEAK_DB = 9.0
+C_BODY_PEAK_STRONG_DB = 12.0
 
-    Without this gate A's loose thresholds would steal samples that structurally
-    belong to C (extreme lowmid / body) or B (hollow boxy without lows).
+
+def in_c_territory(metrics: dict[str, Any]) -> bool:
+    """C is the 'head-heavy, presence-starved, peaky body' pattern.
+
+    All three structural conditions must hold — this is qualitatively different
+    from A (which only measures absolute body ratios with no peakiness or
+    presence-starved requirement).
     """
-    if metrics["ratios"]["lowmid"] >= 0.55:
-        return False
-    if metrics["body_to_presence"] is not None and metrics["body_to_presence"] >= 5.0:
+    return (
+        metrics["group_ratios"]["body"] >= C_BODY_DOMINANT_RATIO
+        and metrics["group_ratios"]["presence"] <= C_PRESENCE_STARVED_RATIO
+        and metrics["peakiness_upper"] >= C_BODY_PEAK_DB
+    )
+
+
+def in_a_territory(metrics: dict[str, Any]) -> bool:
+    """A fires only outside C's extreme zone and outside B's hollow-boxy zone."""
+    if in_c_territory(metrics):
         return False
     if is_hollow_boxy_body_without_lows(metrics):
         return False

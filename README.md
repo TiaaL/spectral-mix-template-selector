@@ -186,9 +186,11 @@ Batch output CSV includes one row per audio file with:
 ## Classification Rules
 
 Classification rules live near the top of
-`spectrum_template_analyzer.py` in `CLASSIFICATION_RULES`.
+`spectrum_template_analyzer.py` in `CLASSIFICATION_RULES`. Each template has
+a `rules` dict (regular hits) and a `strong_rules` dict (the same metrics at
+a higher severity threshold).
 
-Templates:
+### Templates
 
 | Label | Name | Targets |
 | --- | --- | --- |
@@ -196,28 +198,92 @@ Templates:
 | template_B | Peaky / Harsh Vocal | 炸、刺、硬、毛、金属感、某些字突然冲 |
 | template_C | Imbalanced / Heavy Low-Mid | 闷、糊、头重脚轻、缺高频、不通透 |
 
-The three templates are designed to be mutually exclusive. `template_A`'s
-rules are gated by `in_a_territory()`, which suppresses A whenever the
-metrics fall into C's extreme zone (`lowmid >= 0.55` or
-`body_to_presence >= 5.0`) or B's hollow-boxy zone (sparse sub/low plus
-crowded body). C therefore owns the extreme low-mid case and B owns the
-hollow-boxy case without A poaching their samples.
+The three templates are designed to be **mutually exclusive** — each one
+fires only on its own structural pattern, so a single audio file lines up
+cleanly with one template instead of triggering several at once.
 
-Decision flow (top wins):
+### template_A — Muddy / Boxy
+
+A is the "smoothly muddy" pattern: body energy is on the high side but not
+extreme, and there is no qualitatively different signal pushing it into B
+or C. Its rules are gated by `in_a_territory()`, which **suppresses A**
+whenever:
+
+- `in_c_territory()` holds (the metrics fit C's structural pattern), or
+- `is_hollow_boxy_body_without_lows()` holds (B's hollow-boxy pattern —
+  sparse `sub` + `low` foundation but crowded body)
+
+A's rules (`lowmid_ratio_high`, `mid_ratio_high`, `body_to_presence_high`)
+use loose thresholds (e.g. `lowmid >= 0.28`) and the strong variants use
+stricter ones (e.g. `lowmid >= 0.34`).
+
+### template_B — Peaky / Harsh
+
+B fires on high-frequency problems: large ratio in `upper` / `harsh` / `sib`,
+or prominent peaks (`peakiness_upper`, `peakiness_harsh`). B also owns the
+`hollow_boxy_body_without_lows` case — a vocal with almost no sub/low but
+heavy lowmid+mid, which sounds "boxy/hollow" rather than warm.
+
+If `peakiness_harsh >= 12 dB`, B wins unconditionally — a real de-ess problem
+takes priority over everything else.
+
+### template_C — Imbalanced / Heavy Low-Mid
+
+C is the "head-heavy, presence-starved, peaky body" pattern, qualitatively
+different from A's smooth muddiness. Its `in_c_territory()` gate requires
+**all three** structural conditions simultaneously:
+
+| Condition | Threshold | Constant |
+| --- | --- | --- |
+| body dominant | `group_ratios.body >= 0.70` | `C_BODY_DOMINANT_RATIO` |
+| presence starved | `group_ratios.presence <= 0.10` | `C_PRESENCE_STARVED_RATIO` |
+| body resonance peak | `peakiness_upper >= 9 dB` | `C_BODY_PEAK_DB` |
+
+This is the key difference vs A: a vocal that is just heavy in low or
+lowmid without a 1-4 kHz resonance peak (e.g. smoothly dark, no sharp
+spike) **stays in A** even if its lowmid ratio is very high. Only when the
+body region also rings with a resonant peak does C take over.
+
+Once inside C's territory, the individual `rules` (e.g. `extreme_lowmid`,
+`very_high_body_to_presence`, `band_limited_highs`, `body_peak_spiky`)
+contribute hits, and `strong_rules` (e.g. `mega_lowmid`,
+`extreme_body_to_presence`, `very_spiky_body_peak`) contribute strong hits.
+
+### Decision Flow
+
+After every rule is evaluated, the label is chosen as follows (top wins):
 
 1. If `peakiness_harsh >= 12 dB`, choose `template_B` — a real harsh spike
    always takes priority (de-ess before anything else).
-2. Otherwise A, B, and C compete as equals on their hit counts:
+2. Otherwise A, B, and C compete as equals:
    - If exactly one template has any `strong_hits`, that "smoking gun"
      template wins.
    - Else rank by `(hits, strong_hits)`; ties break in the order A > B > C.
 
 `minimum_hits` no longer gates label selection — it remains in the JSON
-output as a "qualified" flag for diagnostics.
+output as a `qualified` flag for diagnostics.
 
-The thresholds are intentionally explicit and easy to tune. Adjust the values
-in `CLASSIFICATION_RULES` for your product, vocal model, genre, language, or
-mixing style.
+### Tuning
+
+All thresholds are module-level constants or inline numbers in
+`CLASSIFICATION_RULES`. The most impactful knobs:
+
+| Constant | Purpose |
+| --- | --- |
+| `DECISIVE_HARSH_PEAK_DB` | dB threshold for the B override |
+| `C_BODY_DOMINANT_RATIO` | how heavy the body group must be for C |
+| `C_PRESENCE_STARVED_RATIO` | how dead the presence group must be for C |
+| `C_BODY_PEAK_DB` | dB threshold for "body resonance peak" |
+| `SPARSE_LOW_FOUNDATION_RATIO` | sub+low cutoff for B's hollow-boxy rule |
+| `HOLLOW_BOXY_BODY_RATIO` | body cutoff for B's hollow-boxy rule |
+| `HOLLOW_BOXY_LOWMID_RATIO` | lowmid cutoff for B's hollow-boxy rule |
+| `PEAKINESS_NOISE_FLOOR_RATIO` | minimum band ratio before trusting its peakiness (otherwise codec residue invents spikes) |
+
+Adjust these for your product, vocal model, genre, language, or mixing
+style. When a real sample is misclassified, the easiest debug path is to
+run `python3 spectrum_template_analyzer.py FILE.wav` and inspect the
+returned `ratios`, `group_ratios`, `body_to_presence`, and `peakiness_*`
+fields against the gates above.
 
 ## Notes
 
