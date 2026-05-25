@@ -34,14 +34,6 @@ PEAKINESS_NOISE_FLOOR_RATIO = 0.02
 # "de-ess before de-mud" is the perceptual priority.
 DECISIVE_HARSH_PEAK_DB = 12.0
 
-# Treat vocals with little energy below ~200Hz but a crowded 180Hz-1kHz body as
-# a separate problem. They are not truly "thick"; they are hollow/boxy and use
-# template_B in the downstream service.
-SPARSE_LOW_FOUNDATION_RATIO = 0.06
-HOLLOW_BOXY_BODY_RATIO = 0.75
-HOLLOW_BOXY_LOWMID_RATIO = 0.35
-
-
 BANDS = OrderedDict(
     [
         ("sub", (20.0, 80.0)),
@@ -63,7 +55,7 @@ CLASSIFICATION_RULES = {
         "tags": ["厚", "闷", "糊", "鼻", "箱感", "主体偏暗"],
         "minimum_hits": 2,
         # in_a_territory gates every rule so A stays mutually exclusive with
-        # C (extreme zone) and B (hollow-boxy zone).
+        # C's structural zone.
         "rules": {
             "lowmid_ratio_high": lambda m: m["ratios"]["lowmid"] >= 0.28 and in_a_territory(m),
             "mid_ratio_high": lambda m: m["ratios"]["mid"] >= 0.20 and in_a_territory(m),
@@ -102,7 +94,6 @@ CLASSIFICATION_RULES = {
             "sib_ratio_high": lambda m: m["ratios"]["sib"] >= 0.12,
             "upper_peak_spiky": lambda m: m["peakiness_upper"] >= 9.0,
             "harsh_peak_spiky": lambda m: m["peakiness_harsh"] >= 9.0,
-            "hollow_boxy_body_without_lows": lambda m: is_hollow_boxy_body_without_lows(m),
         },
         "strong_rules": {
             "very_spiky_harsh": lambda m: m["peakiness_harsh"] >= 12.0,
@@ -119,18 +110,6 @@ def safe_ge(value: float | None, threshold: float) -> bool:
 
 def safe_le(value: float | None, threshold: float) -> bool:
     return value is not None and value <= threshold
-
-
-def low_foundation_ratio(metrics: dict[str, Any]) -> float:
-    return metrics["ratios"]["sub"] + metrics["ratios"]["low"]
-
-
-def is_hollow_boxy_body_without_lows(metrics: dict[str, Any]) -> bool:
-    return (
-        low_foundation_ratio(metrics) <= SPARSE_LOW_FOUNDATION_RATIO
-        and metrics["group_ratios"]["body"] >= HOLLOW_BOXY_BODY_RATIO
-        and metrics["ratios"]["lowmid"] >= HOLLOW_BOXY_LOWMID_RATIO
-    )
 
 
 C_BODY_DOMINANT_RATIO = 0.70
@@ -154,12 +133,8 @@ def in_c_territory(metrics: dict[str, Any]) -> bool:
 
 
 def in_a_territory(metrics: dict[str, Any]) -> bool:
-    """A fires only outside C's extreme zone and outside B's hollow-boxy zone."""
-    if in_c_territory(metrics):
-        return False
-    if is_hollow_boxy_body_without_lows(metrics):
-        return False
-    return True
+    """A fires only outside C's structural zone."""
+    return not in_c_territory(metrics)
 
 
 def strip_silence(y: np.ndarray, top_db: float) -> np.ndarray:

@@ -204,28 +204,29 @@ cleanly with one template instead of triggering several at once.
 
 ### template_A — Muddy / Boxy
 
-A is the "smoothly muddy" pattern: body energy is on the high side but not
-extreme, and there is no qualitatively different signal pushing it into B
-or C. Its rules are gated by `in_a_territory()`, which **suppresses A**
-whenever:
-
-- `in_c_territory()` holds (the metrics fit C's structural pattern), or
-- `is_hollow_boxy_body_without_lows()` holds (B's hollow-boxy pattern —
-  sparse `sub` + `low` foundation but crowded body)
+A is the default "muddy / boxy" pattern: body energy is on the high side
+and there is no qualitatively different signal pushing it into B (high-frequency
+problem) or C (full structural imbalance). A's rules are gated by
+`in_a_territory()`, which suppresses A only when `in_c_territory()` holds —
+so A owns every other body-heavy vocal, **including hollow / boxy vocals
+that lack a low foundation** (those are still "箱感", which is A territory).
 
 A's rules (`lowmid_ratio_high`, `mid_ratio_high`, `body_to_presence_high`)
-use loose thresholds (e.g. `lowmid >= 0.28`) and the strong variants use
+use loose thresholds (e.g. `lowmid >= 0.28`); the strong variants use
 stricter ones (e.g. `lowmid >= 0.34`).
 
 ### template_B — Peaky / Harsh
 
-B fires on high-frequency problems: large ratio in `upper` / `harsh` / `sib`,
-or prominent peaks (`peakiness_upper`, `peakiness_harsh`). B also owns the
-`hollow_boxy_body_without_lows` case — a vocal with almost no sub/low but
-heavy lowmid+mid, which sounds "boxy/hollow" rather than warm.
+B fires only on high-frequency problems:
 
-If `peakiness_harsh >= 12 dB`, B wins unconditionally — a real de-ess problem
-takes priority over everything else.
+- large ratio in `upper` (≥ 0.26) / `harsh` (≥ 0.16) / `sib` (≥ 0.12), or
+- prominent peaks (`peakiness_upper >= 9 dB`, `peakiness_harsh >= 9 dB`).
+
+Body shape alone is never a B signal — without high-frequency evidence the
+vocal is just muddy (A) or imbalanced (C).
+
+If `peakiness_harsh >= 12 dB`, B wins unconditionally — a real de-ess
+problem takes priority over everything else.
 
 ### template_C — Imbalanced / Heavy Low-Mid
 
@@ -274,9 +275,6 @@ All thresholds are module-level constants or inline numbers in
 | `C_BODY_DOMINANT_RATIO` | how heavy the body group must be for C |
 | `C_PRESENCE_STARVED_RATIO` | how dead the presence group must be for C |
 | `C_BODY_PEAK_DB` | dB threshold for "body resonance peak" |
-| `SPARSE_LOW_FOUNDATION_RATIO` | sub+low cutoff for B's hollow-boxy rule |
-| `HOLLOW_BOXY_BODY_RATIO` | body cutoff for B's hollow-boxy rule |
-| `HOLLOW_BOXY_LOWMID_RATIO` | lowmid cutoff for B's hollow-boxy rule |
 | `PEAKINESS_NOISE_FLOOR_RATIO` | minimum band ratio before trusting its peakiness (otherwise codec residue invents spikes) |
 
 Adjust these for your product, vocal model, genre, language, or mixing
