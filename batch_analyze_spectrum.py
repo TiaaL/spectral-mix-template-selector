@@ -84,6 +84,7 @@ def analyze_file(path: Path, args: argparse.Namespace) -> dict[str, Any]:
         "body_to_presence": result["body_to_presence"],
         "peakiness_upper": result["peakiness_upper"],
         "peakiness_harsh": result["peakiness_harsh"],
+        "peakiness_sib": result["peakiness_sib"],
     }
     row.update(ratio_fields(result))
     row.update(template_fields(classification))
@@ -121,6 +122,7 @@ def build_summary(rows: list[dict[str, Any]], errors: list[dict[str, str]]) -> d
     label_counts = Counter(row["classification"] for row in rows)
     harsh_top = sorted(rows, key=lambda r: finite_number(r["peakiness_harsh"]), reverse=True)[:10]
     upper_top = sorted(rows, key=lambda r: finite_number(r["peakiness_upper"]), reverse=True)[:10]
+    sib_top = sorted(rows, key=lambda r: finite_number(r["peakiness_sib"]), reverse=True)[:10]
 
     return {
         "total_files": len(rows) + len(errors),
@@ -143,6 +145,14 @@ def build_summary(rows: list[dict[str, Any]], errors: list[dict[str, str]]) -> d
                 "peakiness_upper": row["peakiness_upper"],
             }
             for row in upper_top
+        ],
+        "top_sib_peakiness": [
+            {
+                "filename": row["filename"],
+                "classification": row["classification"],
+                "peakiness_sib": row["peakiness_sib"],
+            }
+            for row in sib_top
         ],
     }
 
@@ -207,7 +217,8 @@ def main() -> None:
             f"[{index:02d}/{len(files)}] {path.name} -> {row['classification']} "
             f"body/pres={finite_number(row['body_to_presence']):.3f} "
             f"upper_peak={finite_number(row['peakiness_upper']):.2f} "
-            f"harsh_peak={finite_number(row['peakiness_harsh']):.2f}"
+            f"harsh_peak={finite_number(row['peakiness_harsh']):.2f} "
+            f"sib_peak={finite_number(row['peakiness_sib']):.2f}"
         )
 
     if rows:

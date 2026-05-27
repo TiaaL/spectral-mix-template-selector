@@ -26,9 +26,15 @@ import numpy as np
 from scipy.signal import find_peaks
 
 
-# Peakiness in a band is only trusted when the band itself has real energy.
-# Below this ratio it's noise-floor structure (typical for codec-banded files).
-PEAKINESS_NOISE_FLOOR_RATIO = 0.02
+# Peakiness in a band is only trusted when the band has real energy. Using a
+# *ratio* threshold here was wrong: in heavily body-dominant mixes (e.g. 73%
+# lowmid) a real sibilant spike in harsh/sib can sit at 1–2% ratio and still
+# be perceptually sharp — the ratio check would silently mask it.
+#
+# We instead check the band's max level in dB-relative-to-max-spectral-bin.
+# Truly empty bands (codec-banded sources) bottom out near -80 dB; real
+# content stays well above -60 dB even when its band ratio is tiny.
+PEAKINESS_NOISE_FLOOR_DB = -60.0
 
 # A harsh peak this prominent forces template_B regardless of body indicators —
 # "de-ess before de-mud" is the perceptual priority.
@@ -114,6 +120,7 @@ def safe_le(value: float | None, threshold: float) -> bool:
 
 C_BODY_DOMINANT_RATIO = 0.70
 C_PRESENCE_STARVED_RATIO = 0.10
+C_PRESENCE_COLLAPSED_RATIO = 0.04
 C_BODY_PEAK_DB = 9.0
 C_BODY_PEAK_STRONG_DB = 12.0
 
@@ -121,15 +128,17 @@ C_BODY_PEAK_STRONG_DB = 12.0
 def in_c_territory(metrics: dict[str, Any]) -> bool:
     """C is the 'head-heavy, presence-starved, peaky body' pattern.
 
-    All three structural conditions must hold — this is qualitatively different
-    from A (which only measures absolute body ratios with no peakiness or
-    presence-starved requirement).
+    Normally requires body-dominant + presence-starved + a peaky body. But when
+    presence has fully collapsed (≤ C_PRESENCE_COLLAPSED_RATIO), there is no
+    upper-band content for peakiness to register on — that's a band-limited /
+    severely-muffled source, which is qualitatively *worse* than C, so we let
+    it fall into C territory without the peakiness requirement.
     """
-    return (
-        metrics["group_ratios"]["body"] >= C_BODY_DOMINANT_RATIO
-        and metrics["group_ratios"]["presence"] <= C_PRESENCE_STARVED_RATIO
-        and metrics["peakiness_upper"] >= C_BODY_PEAK_DB
-    )
+    body_heavy = metrics["group_ratios"]["body"] >= C_BODY_DOMINANT_RATIO
+    presence_starved = metrics["group_ratios"]["presence"] <= C_PRESENCE_STARVED_RATIO
+    presence_collapsed = metrics["group_ratios"]["presence"] <= C_PRESENCE_COLLAPSED_RATIO
+    has_body_peak = metrics["peakiness_upper"] >= C_BODY_PEAK_DB
+    return body_heavy and presence_starved and (has_body_peak or presence_collapsed)
 
 
 def in_a_territory(metrics: dict[str, Any]) -> bool:
@@ -309,13 +318,29 @@ def analyze_audio(
         *active_bands.get("harsh", BANDS["harsh"]),
         prominence_db=peak_prominence_db,
     ) if "harsh" in active_bands else 0.0
+    peakiness_sib = band_peakiness(
+        mean_db_spectrum,
+        freqs,
+        *active_bands.get("sib", BANDS["sib"]),
+        prominence_db=peak_prominence_db,
+    ) if "sib" in active_bands else 0.0
 
     # Noise-floor hygiene: ignore peakiness when its band has no real content,
     # otherwise find_peaks invents spikes from quantization/codec residue.
-    if ratios["upper"] < PEAKINESS_NOISE_FLOOR_RATIO:
+    # See PEAKINESS_NOISE_FLOOR_DB — gated on absolute level, not band ratio,
+    # so a narrow sib peak inside a body-dominated mix still registers.
+    def _band_is_empty(low_hz: float, high_hz: float) -> bool:
+        mask = band_mask(freqs, low_hz, high_hz)
+        if not mask.any():
+            return True
+        return float(mean_db_spectrum[mask].max()) <= PEAKINESS_NOISE_FLOOR_DB
+
+    if "upper" not in active_bands or _band_is_empty(*active_bands.get("upper", BANDS["upper"])):
         peakiness_upper = 0.0
-    if ratios["harsh"] < PEAKINESS_NOISE_FLOOR_RATIO:
+    if "harsh" not in active_bands or _band_is_empty(*active_bands.get("harsh", BANDS["harsh"])):
         peakiness_harsh = 0.0
+    if "sib" not in active_bands or _band_is_empty(*active_bands.get("sib", BANDS["sib"])):
+        peakiness_sib = 0.0
 
     metrics: dict[str, Any] = {
         "audio_path": str(path),
@@ -333,6 +358,7 @@ def analyze_audio(
         "body_to_presence": body_to_presence,
         "peakiness_upper": peakiness_upper,
         "peakiness_harsh": peakiness_harsh,
+        "peakiness_sib": peakiness_sib,
     }
     metrics["classification"] = classify(metrics)
     return metrics

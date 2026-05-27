@@ -128,6 +128,7 @@ It then computes:
 - `body_to_presence`: `E(180-1000 Hz) / E(1k-8k Hz)`
 - `peakiness_upper`: highest peak prominence in the 1k-4k band
 - `peakiness_harsh`: highest peak prominence in the 4k-8k band
+- `peakiness_sib`: highest peak prominence in the 8k-12k band
 
 ## Output
 
@@ -148,6 +149,7 @@ The command prints a JSON dict:
   "body_to_presence": 1.17,
   "peakiness_upper": 7.2,
   "peakiness_harsh": 5.8,
+  "peakiness_sib": 6.0,
   "classification": {
     "label": "template_A"
   }
@@ -180,7 +182,7 @@ Batch output CSV includes one row per audio file with:
 - selected classification label
 - all band ratios
 - `body_to_presence`
-- `peakiness_upper` and `peakiness_harsh`
+- `peakiness_upper`, `peakiness_harsh`, and `peakiness_sib`
 - template hit counts and matched rule names
 
 ## Classification Rules
@@ -275,7 +277,7 @@ All thresholds are module-level constants or inline numbers in
 | `C_BODY_DOMINANT_RATIO` | how heavy the body group must be for C |
 | `C_PRESENCE_STARVED_RATIO` | how dead the presence group must be for C |
 | `C_BODY_PEAK_DB` | dB threshold for "body resonance peak" |
-| `PEAKINESS_NOISE_FLOOR_RATIO` | minimum band ratio before trusting its peakiness (otherwise codec residue invents spikes) |
+| `PEAKINESS_NOISE_FLOOR_DB` | max-dB floor a band must clear before its peakiness is trusted (a band that bottoms out near -80 dB is treated as empty; using a ratio threshold here was wrong — it masked real sib/harsh spikes inside body-dominated mixes) |
 
 Adjust these for your product, vocal model, genre, language, or mixing
 style. When a real sample is misclassified, the easiest debug path is to
