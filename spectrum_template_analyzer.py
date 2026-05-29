@@ -55,6 +55,39 @@ BANDS = OrderedDict(
 
 
 # Template thresholds — most taste/project-dependent part of the script.
+DIAGNOSTIC_BANDS = OrderedDict(
+    [
+        ("sub_30_80", (30.0, 80.0)),
+        ("low_80_200", (80.0, 200.0)),
+        ("lowmid_200_500", (200.0, 500.0)),
+        ("honky_600_800", (600.0, 800.0)),
+        ("nasal_800_1200", (800.0, 1200.0)),
+        ("presence_2k_5k", (2000.0, 5000.0)),
+        ("harsh_5k_8k", (5000.0, 8000.0)),
+        ("sibilance_6k_10k", (6000.0, 10000.0)),
+        ("air_10k_16k", (10000.0, 16000.0)),
+    ]
+)
+
+SPECTRAL_TARGET_CURVE_DB = OrderedDict(
+    [
+        ("sub", -18.0),
+        ("low", -6.0),
+        ("lowmid", -3.0),
+        ("mid", 0.0),
+        ("upper", 2.0),
+        ("harsh", -1.0),
+        ("sib", -4.0),
+        ("air", -8.0),
+    ]
+)
+
+SPECTRAL_CUT_THRESHOLD_DB = 3.0
+SPECTRAL_BOOST_THRESHOLD_DB = -5.0
+SPECTRAL_MAX_SUGGESTED_DB = 6.0
+BODY_ABS_HIGH_DB = -10.0
+PRESENCE_ABS_LOW_DB = -18.0
+
 CLASSIFICATION_RULES = {
     "template_A": {
         "name": "Muddy / Boxy Vocal",
@@ -166,6 +199,94 @@ def band_power(power: np.ndarray, freqs: np.ndarray, low_hz: float, high_hz: flo
     return float(power[mask, :].sum())
 
 
+def active_band_map(
+    bands: "OrderedDict[str, tuple[float, float]]",
+    effective_nyquist: float,
+) -> tuple["OrderedDict[str, tuple[float, float]]", list[str]]:
+    active: "OrderedDict[str, tuple[float, float]]" = OrderedDict()
+    dropped: list[str] = []
+    for name, (low_hz, high_hz) in bands.items():
+        if low_hz >= effective_nyquist:
+            dropped.append(name)
+            continue
+        active[name] = (low_hz, min(high_hz, effective_nyquist))
+    return active, dropped
+
+
+def band_mean_db(mean_db_spectrum: np.ndarray, freqs: np.ndarray, low_hz: float, high_hz: float) -> float:
+    mask = band_mask(freqs, low_hz, high_hz)
+    if not np.any(mask):
+        return -120.0
+    return float(np.mean(mean_db_spectrum[mask]))
+
+
+def band_max_db(mean_db_spectrum: np.ndarray, freqs: np.ndarray, low_hz: float, high_hz: float) -> float:
+    mask = band_mask(freqs, low_hz, high_hz)
+    if not np.any(mask):
+        return -120.0
+    return float(np.max(mean_db_spectrum[mask]))
+
+
+def spectral_curve_deviation(band_levels_db: dict[str, float]) -> dict[str, dict[str, Any]]:
+    mid_ref = band_levels_db.get("mid")
+    if mid_ref is None:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for band, target_db in SPECTRAL_TARGET_CURVE_DB.items():
+        if band not in band_levels_db:
+            continue
+        actual_db = band_levels_db[band] - mid_ref
+        deviation_db = actual_db - target_db
+        if deviation_db > SPECTRAL_CUT_THRESHOLD_DB:
+            action = "cut"
+            suggested_db = deviation_db - 2.0
+        elif deviation_db < SPECTRAL_BOOST_THRESHOLD_DB:
+            action = "boost"
+            suggested_db = abs(deviation_db) - 3.0
+        else:
+            action = "ok"
+            suggested_db = 0.0
+        if band_levels_db[band] <= PEAKINESS_NOISE_FLOOR_DB:
+            action = "low_content"
+            suggested_db = 0.0
+        out[band] = {
+            "actual_db": round(actual_db, 3),
+            "target_db": target_db,
+            "deviation_db": round(deviation_db, 3),
+            "action": action,
+            "suggested_db": round(min(SPECTRAL_MAX_SUGGESTED_DB, max(0.0, suggested_db)), 3),
+        }
+    return out
+
+
+def body_presence_diagnosis(band_levels_db: dict[str, float]) -> dict[str, Any]:
+    body_level = max(
+        band_levels_db.get("lowmid", -120.0),
+        band_levels_db.get("mid", -120.0),
+    )
+    presence_level = max(
+        band_levels_db.get("upper", -120.0),
+        band_levels_db.get("harsh", -120.0),
+    )
+    body_high = body_level > BODY_ABS_HIGH_DB
+    presence_low = presence_level < PRESENCE_ABS_LOW_DB
+    if body_high and presence_low:
+        action = "cut_body_and_boost_presence"
+    elif body_high:
+        action = "cut_body"
+    elif presence_low:
+        action = "boost_presence"
+    else:
+        action = "balanced"
+    return {
+        "body_level_db": round(body_level, 3),
+        "presence_level_db": round(presence_level, 3),
+        "body_high": body_high,
+        "presence_low": presence_low,
+        "action": action,
+    }
+
+
 def band_peakiness(
     mean_db_spectrum: np.ndarray,
     freqs: np.ndarray,
@@ -266,13 +387,8 @@ def analyze_audio(
     # real content above its own Nyquist. Counting empty high bands in the
     # denominator inflates low-band ratios and breaks calibrated thresholds.
     effective_nyquist = min(used_sr, native_sr) / 2.0
-    active_bands: "OrderedDict[str, tuple[float, float]]" = OrderedDict()
-    dropped_bands: list[str] = []
-    for name, (low_hz, high_hz) in BANDS.items():
-        if low_hz >= effective_nyquist:
-            dropped_bands.append(name)
-            continue
-        active_bands[name] = (low_hz, min(high_hz, effective_nyquist))
+    active_bands, dropped_bands = active_band_map(BANDS, effective_nyquist)
+    active_diagnostic_bands, dropped_diagnostic_bands = active_band_map(DIAGNOSTIC_BANDS, effective_nyquist)
 
     if hop_length is None:
         hop_length = n_fft // 4
@@ -306,6 +422,39 @@ def analyze_audio(
 
     mean_power = np.mean(power, axis=1)
     mean_db_spectrum = librosa.power_to_db(mean_power, ref=np.max)
+    band_levels_db = {
+        name: band_mean_db(mean_db_spectrum, freqs, low_hz, high_hz)
+        for name, (low_hz, high_hz) in active_bands.items()
+    }
+    for name in dropped_bands:
+        band_levels_db[name] = -120.0
+    diagnostic_energies = {
+        name: band_power(power, freqs, low_hz, high_hz)
+        for name, (low_hz, high_hz) in active_diagnostic_bands.items()
+    }
+    for name in dropped_diagnostic_bands:
+        diagnostic_energies[name] = 0.0
+    diagnostic_total = float(sum(diagnostic_energies.values()))
+    diagnostic_ratios = {
+        name: (energy / diagnostic_total if diagnostic_total > 0 else 0.0)
+        for name, energy in diagnostic_energies.items()
+    }
+    diagnostic_band_levels_db = {
+        name: {
+            "mean_db": band_mean_db(mean_db_spectrum, freqs, low_hz, high_hz),
+            "max_db": band_max_db(mean_db_spectrum, freqs, low_hz, high_hz),
+        }
+        for name, (low_hz, high_hz) in active_diagnostic_bands.items()
+    }
+    for name in dropped_diagnostic_bands:
+        diagnostic_band_levels_db[name] = {"mean_db": -120.0, "max_db": -120.0}
+    presence_2k_5k = diagnostic_energies.get("presence_2k_5k", 0.0)
+    air_10k_16k = diagnostic_energies.get("air_10k_16k", 0.0)
+    air_to_presence = air_10k_16k / presence_2k_5k if presence_2k_5k > 0 else None
+    nasal_peak_db = diagnostic_band_levels_db.get("nasal_800_1200", {}).get("max_db", -120.0)
+    honky_peak_db = diagnostic_band_levels_db.get("honky_600_800", {}).get("max_db", -120.0)
+    spectral_deviation = spectral_curve_deviation(band_levels_db)
+    body_presence = body_presence_diagnosis(band_levels_db)
     peakiness_upper = band_peakiness(
         mean_db_spectrum,
         freqs,
@@ -348,12 +497,23 @@ def analyze_audio(
         "native_sample_rate": native_sr,
         "effective_nyquist_hz": effective_nyquist,
         "dropped_bands": dropped_bands,
+        "dropped_diagnostic_bands": dropped_diagnostic_bands,
         "n_fft": n_fft,
         "hop_length": hop_length,
         "trim_silence": trim,
         "top_db": top_db,
         "band_energies": energies,
         "ratios": ratios,
+        "band_levels_db": band_levels_db,
+        "diagnostic_band_energies": diagnostic_energies,
+        "diagnostic_ratios": diagnostic_ratios,
+        "diagnostic_band_levels_db": diagnostic_band_levels_db,
+        "air_to_presence": air_to_presence,
+        "nasal_peak_db": nasal_peak_db,
+        "honky_peak_db": honky_peak_db,
+        "spectral_target_curve_db": SPECTRAL_TARGET_CURVE_DB,
+        "spectral_deviation": spectral_deviation,
+        "body_presence_diagnosis": body_presence,
         "group_ratios": group_ratios,
         "body_to_presence": body_to_presence,
         "peakiness_upper": peakiness_upper,

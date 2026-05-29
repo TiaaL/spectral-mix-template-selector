@@ -8,6 +8,11 @@ __pycache__/
 .venv/
 venv/
 env/
+node_modules/
+python/
+python-*-standalone.tar.gz
+.browser_profiles/
+.tmp/
 
 # Local audio/data artifacts. Keep real datasets out of GitHub.
 downloads/
@@ -25,3 +30,5 @@ batch_results.csv
 spectrum_classification_results.csv
 spectrum_classification_summary.json
 download_manifest.csv
+progress*.png
+stop_state.png

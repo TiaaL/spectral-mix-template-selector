@@ -51,6 +51,39 @@ path/to/audio_folder/spectrum_classification_results.csv
 path/to/audio_folder/spectrum_classification_summary.json
 ```
 
+## Auto Mix Bridge
+
+This repository owns the spectrum analyzer. The actual Faust/template renderer
+lives in the sibling project:
+
+```text
+D:\code\music_auto_mix1\music_auto_mix1
+```
+
+For convenience, `scripts/auto_template_mix.py` in this repo is a thin bridge
+that forwards to the renderer project and uses this repo's
+`spectrum_template_analyzer.py` by default.
+
+From this repository:
+
+```powershell
+.\python\python.exe scripts\auto_template_mix.py vocal.wav accomp.wav final.wav --dry-run
+```
+
+If you created a local venv here, this also works:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\auto_template_mix.py vocal.wav accomp.wav final.wav --dry-run
+```
+
+You can still override the analyzer environment explicitly:
+
+```powershell
+.\python\python.exe scripts\auto_template_mix.py vocal.wav accomp.wav final.wav `
+  --analyzer-python D:\path\to\python.exe `
+  --analyzer D:\code\spectral-mix-template-selector\spectrum_template_analyzer.py
+```
+
 ## Single File Usage
 
 ```bash
