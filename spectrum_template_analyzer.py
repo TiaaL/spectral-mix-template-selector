@@ -39,6 +39,8 @@ PEAKINESS_NOISE_FLOOR_DB = -60.0
 # A harsh peak this prominent forces template_B regardless of body indicators —
 # "de-ess before de-mud" is the perceptual priority.
 DECISIVE_HARSH_PEAK_DB = 12.0
+TEMPLATE_D_NAME = "Fallback / Compound Vocal"
+TEMPLATE_D_TAGS = ["fallback", "compound", "low_confidence"]
 
 BANDS = OrderedDict(
     [
@@ -192,11 +194,27 @@ def band_mask(freqs: np.ndarray, low_hz: float, high_hz: float) -> np.ndarray:
     return (freqs >= low_hz) & (freqs < high_hz)
 
 
+def band_masks(
+    freqs: np.ndarray,
+    bands: "OrderedDict[str, tuple[float, float]]",
+) -> dict[str, np.ndarray]:
+    return {
+        name: band_mask(freqs, low_hz, high_hz)
+        for name, (low_hz, high_hz) in bands.items()
+    }
+
+
 def band_power(power: np.ndarray, freqs: np.ndarray, low_hz: float, high_hz: float) -> float:
     mask = band_mask(freqs, low_hz, high_hz)
     if not np.any(mask):
         return 0.0
     return float(power[mask, :].sum())
+
+
+def band_power_from_bin_energy(bin_energy: np.ndarray, mask: np.ndarray) -> float:
+    if not np.any(mask):
+        return 0.0
+    return float(bin_energy[mask].sum())
 
 
 def active_band_map(
@@ -220,11 +238,29 @@ def band_mean_db(mean_db_spectrum: np.ndarray, freqs: np.ndarray, low_hz: float,
     return float(np.mean(mean_db_spectrum[mask]))
 
 
+def band_mean_db_from_mask(mean_db_spectrum: np.ndarray, mask: np.ndarray) -> float:
+    if not np.any(mask):
+        return -120.0
+    return float(np.mean(mean_db_spectrum[mask]))
+
+
 def band_max_db(mean_db_spectrum: np.ndarray, freqs: np.ndarray, low_hz: float, high_hz: float) -> float:
     mask = band_mask(freqs, low_hz, high_hz)
     if not np.any(mask):
         return -120.0
     return float(np.max(mean_db_spectrum[mask]))
+
+
+def band_max_db_from_mask(mean_db_spectrum: np.ndarray, mask: np.ndarray) -> float:
+    if not np.any(mask):
+        return -120.0
+    return float(np.max(mean_db_spectrum[mask]))
+
+
+def band_is_empty(mean_db_spectrum: np.ndarray, mask: np.ndarray) -> bool:
+    if not np.any(mask):
+        return True
+    return float(mean_db_spectrum[mask].max()) <= PEAKINESS_NOISE_FLOOR_DB
 
 
 def spectral_curve_deviation(band_levels_db: dict[str, float]) -> dict[str, dict[str, Any]]:
@@ -296,6 +332,15 @@ def band_peakiness(
     top_n: int = 2,
 ) -> float:
     mask = band_mask(freqs, low_hz, high_hz)
+    return band_peakiness_from_mask(mean_db_spectrum, mask, prominence_db, top_n=top_n)
+
+
+def band_peakiness_from_mask(
+    mean_db_spectrum: np.ndarray,
+    mask: np.ndarray,
+    prominence_db: float,
+    top_n: int = 2,
+) -> float:
     band_db = mean_db_spectrum[mask]
     if band_db.size < 3:
         return 0.0
@@ -338,7 +383,10 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
 
     # Decisive override: a real harsh spike outranks every other signal —
     # de-essing the spike is always the priority when one exists.
-    if metrics["peakiness_harsh"] >= DECISIVE_HARSH_PEAK_DB:
+    decisive_harsh = metrics["peakiness_harsh"] >= DECISIVE_HARSH_PEAK_DB
+    d_rules: list[str] = []
+
+    if decisive_harsh:
         label = "template_B"
     else:
         # Equal-priority three-way selection.
@@ -359,12 +407,41 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
 
+        selected_result = results[label]
+        body_template_qualified = (
+            results["template_A"]["qualified"]
+            or results["template_C"]["qualified"]
+        )
+        harsh_template_qualified = results["template_B"]["qualified"]
+
+        # Template D is not a fourth tonal target; it bridges cases where
+        # A/B/C are weakly evidenced or point in conflicting directions.
+        if not selected_result["qualified"]:
+            d_rules.append("selected_template_not_qualified")
+        if selected_result["strong_hits"] == 0:
+            d_rules.append("selected_template_no_strong_hits")
+        if body_template_qualified and harsh_template_qualified:
+            d_rules.append("body_and_harsh_rules_conflict")
+        if d_rules:
+            label = "template_D"
+
+    results["template_D"] = {
+        "name": TEMPLATE_D_NAME,
+        "tags": TEMPLATE_D_TAGS,
+        "hits": len(d_rules),
+        "hit_rules": d_rules,
+        "strong_hits": 0,
+        "strong_rules": [],
+        "qualified": bool(d_rules),
+    }
+
     return {
         "label": label,
         "label_name": results[label]["name"] if label in results else None,
         "template_A": results["template_A"],
         "template_B": results["template_B"],
         "template_C": results["template_C"],
+        "template_D": results["template_D"],
     }
 
 
@@ -396,10 +473,13 @@ def analyze_audio(
     stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length, center=True)
     power = np.abs(stft) ** 2
     freqs = librosa.fft_frequencies(sr=used_sr, n_fft=n_fft)
+    active_band_masks = band_masks(freqs, active_bands)
+    active_diagnostic_band_masks = band_masks(freqs, active_diagnostic_bands)
+    bin_energy = power.sum(axis=1)
 
     energies = {
-        name: band_power(power, freqs, low_hz, high_hz)
-        for name, (low_hz, high_hz) in active_bands.items()
+        name: band_power_from_bin_energy(bin_energy, mask)
+        for name, mask in active_band_masks.items()
     }
     for name in dropped_bands:
         energies[name] = 0.0
@@ -420,17 +500,17 @@ def analyze_audio(
         "presence": ratios["upper"] + ratios["harsh"],
     }
 
-    mean_power = np.mean(power, axis=1)
+    mean_power = bin_energy / power.shape[1]
     mean_db_spectrum = librosa.power_to_db(mean_power, ref=np.max)
     band_levels_db = {
-        name: band_mean_db(mean_db_spectrum, freqs, low_hz, high_hz)
-        for name, (low_hz, high_hz) in active_bands.items()
+        name: band_mean_db_from_mask(mean_db_spectrum, mask)
+        for name, mask in active_band_masks.items()
     }
     for name in dropped_bands:
         band_levels_db[name] = -120.0
     diagnostic_energies = {
-        name: band_power(power, freqs, low_hz, high_hz)
-        for name, (low_hz, high_hz) in active_diagnostic_bands.items()
+        name: band_power_from_bin_energy(bin_energy, mask)
+        for name, mask in active_diagnostic_band_masks.items()
     }
     for name in dropped_diagnostic_bands:
         diagnostic_energies[name] = 0.0
@@ -441,10 +521,10 @@ def analyze_audio(
     }
     diagnostic_band_levels_db = {
         name: {
-            "mean_db": band_mean_db(mean_db_spectrum, freqs, low_hz, high_hz),
-            "max_db": band_max_db(mean_db_spectrum, freqs, low_hz, high_hz),
+            "mean_db": band_mean_db_from_mask(mean_db_spectrum, mask),
+            "max_db": band_max_db_from_mask(mean_db_spectrum, mask),
         }
-        for name, (low_hz, high_hz) in active_diagnostic_bands.items()
+        for name, mask in active_diagnostic_band_masks.items()
     }
     for name in dropped_diagnostic_bands:
         diagnostic_band_levels_db[name] = {"mean_db": -120.0, "max_db": -120.0}
@@ -455,41 +535,23 @@ def analyze_audio(
     honky_peak_db = diagnostic_band_levels_db.get("honky_600_800", {}).get("max_db", -120.0)
     spectral_deviation = spectral_curve_deviation(band_levels_db)
     body_presence = body_presence_diagnosis(band_levels_db)
-    peakiness_upper = band_peakiness(
-        mean_db_spectrum,
-        freqs,
-        *active_bands.get("upper", BANDS["upper"]),
-        prominence_db=peak_prominence_db,
-    ) if "upper" in active_bands else 0.0
-    peakiness_harsh = band_peakiness(
-        mean_db_spectrum,
-        freqs,
-        *active_bands.get("harsh", BANDS["harsh"]),
-        prominence_db=peak_prominence_db,
-    ) if "harsh" in active_bands else 0.0
-    peakiness_sib = band_peakiness(
-        mean_db_spectrum,
-        freqs,
-        *active_bands.get("sib", BANDS["sib"]),
-        prominence_db=peak_prominence_db,
-    ) if "sib" in active_bands else 0.0
-
     # Noise-floor hygiene: ignore peakiness when its band has no real content,
     # otherwise find_peaks invents spikes from quantization/codec residue.
     # See PEAKINESS_NOISE_FLOOR_DB — gated on absolute level, not band ratio,
     # so a narrow sib peak inside a body-dominated mix still registers.
-    def _band_is_empty(low_hz: float, high_hz: float) -> bool:
-        mask = band_mask(freqs, low_hz, high_hz)
-        if not mask.any():
-            return True
-        return float(mean_db_spectrum[mask].max()) <= PEAKINESS_NOISE_FLOOR_DB
+    def _peakiness_for_band(name: str) -> float:
+        mask = active_band_masks.get(name)
+        if mask is None or band_is_empty(mean_db_spectrum, mask):
+            return 0.0
+        return band_peakiness_from_mask(
+            mean_db_spectrum,
+            mask,
+            prominence_db=peak_prominence_db,
+        )
 
-    if "upper" not in active_bands or _band_is_empty(*active_bands.get("upper", BANDS["upper"])):
-        peakiness_upper = 0.0
-    if "harsh" not in active_bands or _band_is_empty(*active_bands.get("harsh", BANDS["harsh"])):
-        peakiness_harsh = 0.0
-    if "sib" not in active_bands or _band_is_empty(*active_bands.get("sib", BANDS["sib"])):
-        peakiness_sib = 0.0
+    peakiness_upper = _peakiness_for_band("upper")
+    peakiness_harsh = _peakiness_for_band("harsh")
+    peakiness_sib = _peakiness_for_band("sib")
 
     metrics: dict[str, Any] = {
         "audio_path": str(path),

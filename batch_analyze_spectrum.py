@@ -12,7 +12,9 @@ import argparse
 import csv
 import json
 import math
+import os
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +120,85 @@ def finite_number(value: Any) -> float:
     return 0.0
 
 
+def resolved_jobs(requested_jobs: int, total_files: int) -> int:
+    if total_files <= 0:
+        return 1
+    if requested_jobs == 0:
+        requested_jobs = os.cpu_count() or 1
+    return max(1, min(requested_jobs, total_files))
+
+
+def print_success(index: int, total: int, path: Path, row: dict[str, Any]) -> None:
+    print(
+        f"[{index:02d}/{total}] {path.name} -> {row['classification']} "
+        f"body/pres={finite_number(row['body_to_presence']):.3f} "
+        f"upper_peak={finite_number(row['peakiness_upper']):.2f} "
+        f"harsh_peak={finite_number(row['peakiness_harsh']):.2f} "
+        f"sib_peak={finite_number(row['peakiness_sib']):.2f}"
+    )
+
+
+def print_error(index: int, total: int, path: Path, exc: Exception) -> None:
+    print(f"[{index:02d}/{total}] ERROR {path.name}: {exc}")
+
+
+def analyze_files_serial(
+    files: list[Path],
+    args: argparse.Namespace,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    total = len(files)
+
+    for index, path in enumerate(files, start=1):
+        try:
+            row = analyze_file(path, args)
+        except Exception as exc:  # noqa: BLE001 - keep batch reports complete.
+            errors.append({"filename": path.name, "path": str(path), "error": str(exc)})
+            print_error(index, total, path, exc)
+            continue
+
+        rows.append(row)
+        print_success(index, total, path, row)
+
+    return rows, errors
+
+
+def analyze_files_parallel(
+    files: list[Path],
+    args: argparse.Namespace,
+    jobs: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows_by_index: dict[int, dict[str, Any]] = {}
+    errors_by_index: dict[int, dict[str, str]] = {}
+    total = len(files)
+
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(analyze_file, path, args): (index, path)
+            for index, path in enumerate(files, start=1)
+        }
+        for future in as_completed(futures):
+            index, path = futures[future]
+            try:
+                row = future.result()
+            except Exception as exc:  # noqa: BLE001 - keep batch reports complete.
+                errors_by_index[index] = {
+                    "filename": path.name,
+                    "path": str(path),
+                    "error": str(exc),
+                }
+                print_error(index, total, path, exc)
+                continue
+
+            rows_by_index[index] = row
+            print_success(index, total, path, row)
+
+    rows = [rows_by_index[index] for index in sorted(rows_by_index)]
+    errors = [errors_by_index[index] for index in sorted(errors_by_index)]
+    return rows, errors
+
+
 def build_summary(rows: list[dict[str, Any]], errors: list[dict[str, str]]) -> dict[str, Any]:
     label_counts = Counter(row["classification"] for row in rows)
     harsh_top = sorted(rows, key=lambda r: finite_number(r["peakiness_harsh"]), reverse=True)[:10]
@@ -171,6 +252,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=None, help="CSV output path.")
     parser.add_argument("--summary-json", type=Path, default=None, help="Summary JSON output path.")
     parser.add_argument("--limit", type=int, default=None, help="Analyze only the first N files.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel worker threads. Use 0 for all CPU cores.",
+    )
     parser.add_argument("--sr", type=int, default=44100, help="Target sample rate.")
     parser.add_argument("--n-fft", type=int, default=4096, help="STFT FFT size.")
     parser.add_argument("--hop-length", type=int, default=None, help="STFT hop length.")
@@ -182,7 +269,10 @@ def parse_args() -> argparse.Namespace:
         default=6.0,
         help="find_peaks prominence threshold in dB.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.jobs < 0:
+        parser.error("--jobs must be >= 0")
+    return args
 
 
 def main() -> None:
@@ -200,26 +290,15 @@ def main() -> None:
     output_csv = (args.output_csv or default_csv).expanduser()
     summary_json = (args.summary_json or default_summary).expanduser()
 
+    jobs = resolved_jobs(args.jobs, len(files))
     print(f"Found {len(files)} audio file(s).")
-    rows: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    if jobs > 1:
+        print(f"Using {jobs} worker thread(s).")
 
-    for index, path in enumerate(files, start=1):
-        try:
-            row = analyze_file(path, args)
-        except Exception as exc:  # noqa: BLE001 - keep batch reports complete.
-            errors.append({"filename": path.name, "path": str(path), "error": str(exc)})
-            print(f"[{index:02d}/{len(files)}] ERROR {path.name}: {exc}")
-            continue
-
-        rows.append(row)
-        print(
-            f"[{index:02d}/{len(files)}] {path.name} -> {row['classification']} "
-            f"body/pres={finite_number(row['body_to_presence']):.3f} "
-            f"upper_peak={finite_number(row['peakiness_upper']):.2f} "
-            f"harsh_peak={finite_number(row['peakiness_harsh']):.2f} "
-            f"sib_peak={finite_number(row['peakiness_sib']):.2f}"
-        )
+    if jobs > 1:
+        rows, errors = analyze_files_parallel(files, args, jobs)
+    else:
+        rows, errors = analyze_files_serial(files, args)
 
     if rows:
         write_csv(output_csv, rows)

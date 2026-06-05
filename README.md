@@ -64,10 +64,43 @@ For convenience, `scripts/auto_template_mix.py` in this repo is a thin bridge
 that forwards to the renderer project and uses this repo's
 `spectrum_template_analyzer.py` by default.
 
+Current production renders should enter through `scripts/render_pipeline.py`
+for a single case, or through `scripts/batch_auto_template_mix.py` for Feishu
+manifest batches. The batch script now only pairs rows and writes sheet files;
+the shared render path lives in `scripts/render_pipeline.py`.
+
+The lower-level bridge still forwards to:
+
+```text
+D:\code\music_auto_mix1\music_auto_mix1\scripts\auto_template_mix.py
+```
+
+The current renderer defaults are:
+
+- volume automation is off unless `--with-volume-automation` is explicitly set;
+- the template renderer keeps DelayVerb send at the renderer default, currently
+  85% pre-fader;
+- DelayVerb estimates BPM from the reference backing and selects reverb mode via
+  a measured `space_profile` instead of a fixed short-tail Chamber rule;
+- accompaniment transient safety, reference balance ducking, and the master
+  loudness finalizer run when reference files can be resolved;
+- old batch outputs are reused unless `--force` is passed.
+
 From this repository:
 
 ```powershell
 .\python\python.exe scripts\auto_template_mix.py vocal.wav accomp.wav final.wav --dry-run
+```
+
+Single-case production entrypoint:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\render_pipeline.py `
+  --dry vocal.wav `
+  --accomp accomp.wav `
+  --case-name test `
+  --extra-name song `
+  --row 1
 ```
 
 If you created a local venv here, this also works:
@@ -83,6 +116,32 @@ You can still override the analyzer environment explicitly:
   --analyzer-python D:\path\to\python.exe `
   --analyzer D:\code\spectral-mix-template-selector\spectrum_template_analyzer.py
 ```
+
+Batch Feishu render, forcing stale old-chain outputs to be regenerated:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\batch_auto_template_mix.py --row 35 --force
+.\.venv\Scripts\python.exe scripts\batch_auto_template_mix.py --force
+```
+
+When `--row` is used, the sheet export is written with a row suffix such as
+`feishu_sheet_rows_row_035.tsv`, so the full batch sheet is not overwritten.
+
+For the current production chain, do not pass `--with-volume-automation` unless
+you are deliberately testing the older paragraph-level automation. A correct
+new render summary should show renderer stdout containing:
+
+```text
+[step 1d] External DelayVerb group send
+[step 2a] Accompaniment transient safety
+[step 3a.1] Reference vocal/accompaniment dynamic balance
+[step 4] Master bus chain: Pro-Q3 -> GW MixCentric -> L2 -> loudness finalizer
+```
+
+The batch script explicitly forwards `--reference-audio`, `--reference-vocal`,
+and `--reference-accomp` to the renderer. This is important because some dry
+vocals are resampled into the output directory before rendering, and their
+temporary `_sr44100` filenames are not reliable for automatic reference lookup.
 
 ## Single File Usage
 
@@ -127,6 +186,12 @@ Analyze only the first few files while testing:
 
 ```bash
 python3 batch_analyze_spectrum.py downloads/reconstruct_audio --limit 5
+```
+
+Analyze files in parallel:
+
+```bash
+python3 batch_analyze_spectrum.py downloads/reconstruct_audio --jobs 4
 ```
 
 Supported default extensions:

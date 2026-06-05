@@ -16,6 +16,9 @@ VALUE_OPTIONS = {
     "--render-backend",
     "--report-dir",
     "--report-prefix",
+    "--reference-audio",
+    "--reference-vocal",
+    "--reference-accomp",
 }
 
 
