@@ -130,10 +130,25 @@ python3 spectrum_template_analyzer.py path/to/audio.mp3 --sr 44100 --top-db 35
   "peakiness_sib": 6.0,
   "classification": {
     "label": "template_A",
-    "label_name": "Muddy / Boxy Vocal"
+    "label_name": "Muddy / Boxy Vocal",
+    "selection_reason": "qualified A; non-strong B (if any) handled as secondary issue",
+    "fallback": false,
+    "confidence": "high",
+    "secondary_issues": ["hf_harshness"],
+    "b_evidence_groups": ["hf_peak"]
   }
 }
 ```
+
+`classification` 的决策字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `selection_reason` | 选中该模板的原因 |
+| `fallback` | 是否为「无模板达标」的回落结果 |
+| `confidence` | `high` / `medium` / `low`；回落时为 `low` |
+| `secondary_issues` | 成立但非主模板的问题，交给动态齿音 / HF 保护 |
+| `b_evidence_groups` | B 命中的独立证据组 |
 
 `dropped_bands` 用来提示哪些频段因为源文件有效带宽不足被移出了比例分母。例如 24 kHz 源文件的 Nyquist 是 12 kHz，`air` 频段没有真实内容，会被丢弃。
 
@@ -382,13 +397,37 @@ very_high_harsh_ratio   harsh >= 0.22
 very_high_sib_ratio     sib >= 0.18
 ```
 
-额外优先级：
+B 的证据分组：
+
+B 不再按规则命中数判定，而是要求**独立的高频证据组**，避免同一个指标被重复计票，
+也避免单个尖峰冒充"整体高频有问题"。证据组：
 
 ```text
-DECISIVE_HARSH_PEAK_DB = 12.0
+hf_energy             upper/harsh/sib 任一频段能量超标
+hf_peak               upper 或 harsh 峰形突出（需 presence 未坍塌）
+hf_energy_multiband   两个以上高频频段同时能量超标
+dual_peak_strong      upper 与 harsh 都尖，且 harsh 达强等级（需 presence 未坍塌）
 ```
 
-只要 `peakiness_harsh >= 12 dB`，最终模板直接选 B。
+```text
+B 成立（qualified）：>= 2 个证据组
+B 强成立（strong）  ：>= 3 个证据组，或命中 dual_peak_strong
+```
+
+峰值证据的前提：
+
+```text
+B_PRESENCE_FLOOR_RATIO = 0.10   （= C_PRESENCE_STARVED_RATIO）
+```
+
+当 `group_ratios.presence` 低于该值时，高频能量太少，峰值不能说明"刺耳"，
+只能说明高频已经坍塌，因此不计入峰值类证据组。
+
+```text
+STRONG_HARSH_PEAK_DB = 12.0
+```
+
+`peakiness_harsh >= 12 dB` 是 B 的**强证据**，但单独不再决定最终模板。
 
 ### template_C: Imbalanced / Heavy Low-Mid
 
@@ -434,15 +473,23 @@ very_spiky_body_peak       peakiness_upper >= 12 dB
 
 ## 决策流程
 
-最终标签选择逻辑：
+采用「主模板 + 次要问题保护」的分层逻辑，只有达标（qualified）的模板才能成为最终标签：
 
-1. 如果 `peakiness_harsh >= 12 dB`，直接选择 `template_B`。
-2. 否则 A/B/C 平级竞争。
-3. 如果只有一个模板有 `strong_hits`，该模板胜出。
-4. 否则按 `(hits, strong_hits)` 排序。
-5. 完全打平时按 `template_A > template_B > template_C` 的顺序兜底。
+1. **C 达标**，且 B 未强成立 → 选 `template_C`。
+   严重的 body-heavy / presence-starved 结构优先修，**单个 harsh 峰永远不能推翻已达标的 C**。
+   若 B 也达标，记入 `secondary_issues`。
+2. **C 达标 + B 强成立** → 选 `template_B`，C 结构记入 `secondary_issues`。
+3. **B 强成立**（C 未达标）→ 选 `template_B`；若 A 也达标，A 记入 `secondary_issues`。
+4. **A 达标** → 选 `template_A`；普通 B 作为次要问题记入 `secondary_issues`，
+   交给已有的动态齿音 / HF 保护，不叠加固定 EQ。
+5. **只有 B 达标** → 选 `template_B`。
+6. **没有模板达标** → 回落 `template_A`，并标记 `fallback=true`、
+   `confidence=low` 和回落原因。
 
-`minimum_hits` 现在主要作为诊断字段 `qualified` 输出，不再直接阻止模板成为最终分类。
+次要问题（`secondary_issues`）只进入已有的动态齿音 / HF 保护，不重复叠加固定 EQ，
+避免过度削高频。
+
+`qualified` 现在是真实门槛：未达标的模板不会成为最终标签（回落路径除外）。
 
 ## 调参入口
 
@@ -451,7 +498,8 @@ very_spiky_body_peak       peakiness_upper >= 12 dB
 | 名称 | 作用 |
 | --- | --- |
 | `PEAKINESS_NOISE_FLOOR_DB` | 判断峰值所在频段是否有真实内容 |
-| `DECISIVE_HARSH_PEAK_DB` | harsh 峰值直接归 B 的阈值 |
+| `STRONG_HARSH_PEAK_DB` | harsh 峰值算作 B 强证据的阈值（不再直接决定模板） |
+| `B_PRESENCE_FLOOR_RATIO` | 低于此 presence 占比时，不采信 B 的峰值类证据 |
 | `C_BODY_DOMINANT_RATIO` | C 所需的主体占比 |
 | `C_PRESENCE_STARVED_RATIO` | C 所需的存在感不足阈值 |
 | `C_PRESENCE_COLLAPSED_RATIO` | presence 坍塌时跳过主体峰值要求的阈值 |

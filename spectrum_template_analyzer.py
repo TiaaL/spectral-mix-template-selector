@@ -36,9 +36,12 @@ from scipy.signal import find_peaks
 # content stays well above -60 dB even when its band ratio is tiny.
 PEAKINESS_NOISE_FLOOR_DB = -60.0
 
-# A harsh peak this prominent forces template_B regardless of body indicators —
-# "de-ess before de-mud" is the perceptual priority.
-DECISIVE_HARSH_PEAK_DB = 12.0
+# A harsh peak at this level is *strong* evidence for B, but on its own it is no
+# longer decisive. A single harsh spike used to force B outright, which let an
+# unqualified B (1 hit) beat a fully qualified C on body-dominant, presence-
+# starved material: de-essing a mix whose real problem is a collapsed top end
+# only makes it duller. B now requires independent high-frequency evidence.
+STRONG_HARSH_PEAK_DB = 12.0
 
 BANDS = OrderedDict(
     [
@@ -124,6 +127,12 @@ C_PRESENCE_COLLAPSED_RATIO = 0.04
 C_BODY_PEAK_DB = 9.0
 C_BODY_PEAK_STRONG_DB = 12.0
 
+# Below this presence ratio, peak-shape evidence for B is not trusted: there is
+# too little high-frequency energy for a peak to mean "harsh". Set at C's
+# presence-starved boundary so the two rule sets agree on where the top end is
+# considered collapsed rather than harsh.
+B_PRESENCE_FLOOR_RATIO = C_PRESENCE_STARVED_RATIO
+
 
 def in_c_territory(metrics: dict[str, Any]) -> bool:
     """C is the 'head-heavy, presence-starved, peaky body' pattern.
@@ -191,6 +200,85 @@ def band_peakiness(
     return float(np.mean(top))
 
 
+def band_spectral_flatness(
+    mean_power_spectrum: np.ndarray,
+    freqs: np.ndarray,
+    low_hz: float,
+    high_hz: float,
+) -> float:
+    """某频段内的谱平坦度 = 几何均值 / 算术均值（线性功率谱），值域 0~1。
+
+    用途：区分「AI 分离电音/金属环」和「普通闷糊人声」——这两类用 peakiness
+    和频段能量占比都区分不开（汤刚黄昏 vs 乐园几乎一样）。它们的差别在 upper
+    频段的“能量结构”上：
+
+      - 电音/金属：upper 是少数窄尖峰主导，能量集中 -> flatness 偏低（接近 0）。
+      - 干净/闷糊人声：upper 能量分布宽而平滑 -> flatness 偏高（接近 1）。
+
+    peakiness 抓的是“最尖的几个峰有多突出”，flatness 抓的是“整段能量铺得多平”，
+    两者互补：电音的尖峰可能不算特别突出（peakiness 不高），但整段被几根金属环
+    霸占（flatness 很低），正好补上 peakiness 的盲区。
+    """
+    mask = band_mask(freqs, low_hz, high_hz)
+    band = mean_power_spectrum[mask]
+    # 至少要几根谱线、且必须是正功率，几何均值的 log 才有意义。
+    band = band[band > 0.0]
+    if band.size < 3:
+        # 频段为空或全是 0：没有可分析的结构，返回 1.0（视为“最平坦/无电音特征”），
+        # 避免把空频段误判成“能量极度集中的电音”。
+        return 1.0
+    # 几何均值用 log 域求和再 exp，避免大量小数连乘下溢。
+    geo_mean = float(np.exp(np.mean(np.log(band))))
+    arith_mean = float(np.mean(band))
+    if arith_mean <= 0.0:
+        return 1.0
+    return geo_mean / arith_mean
+
+
+def b_evidence_groups(metrics: dict[str, Any]) -> list[str]:
+    """Independent high-frequency evidence groups supporting template_B.
+
+    Counting raw rule hits over-counted B: several of its rules read the same
+    metric (harsh ratio appears as both a normal and a strong rule), so one
+    acoustic fact could produce several "hits". These groups are deliberately
+    built from *distinct* kinds of evidence, so two groups means two genuinely
+    independent reasons to believe the top end is harsh.
+    """
+    ratios = metrics["ratios"]
+    hf_energy_bands = [
+        band
+        for band, threshold in (("upper", 0.26), ("harsh", 0.16), ("sib", 0.12))
+        if ratios.get(band, 0.0) >= threshold
+    ]
+    upper_spiky = metrics["peakiness_upper"] >= 9.0
+    harsh_spiky = metrics["peakiness_harsh"] >= 9.0
+
+    # Peak shape is only meaningful where there is enough energy to shape. In a
+    # presence-starved mix the whole presence region can sit near 3% of total
+    # energy; peaks measured there describe a collapsed top end, not harshness,
+    # so peak-based evidence is not counted at all below this floor.
+    presence_alive = metrics["group_ratios"].get("presence", 0.0) >= B_PRESENCE_FLOOR_RATIO
+
+    groups: list[str] = []
+    if hf_energy_bands:
+        groups.append("hf_energy")
+    if presence_alive and (upper_spiky or harsh_spiky):
+        groups.append("hf_peak")
+    # Two independent bands carrying excess energy is its own evidence group:
+    # broadband HF excess is not the same fact as a single band being hot.
+    if len(hf_energy_bands) >= 2:
+        groups.append("hf_energy_multiband")
+    # Both presence regions spiking, with the harsh spike at strong level.
+    if (
+        presence_alive
+        and upper_spiky
+        and harsh_spiky
+        and metrics["peakiness_harsh"] >= STRONG_HARSH_PEAK_DB
+    ):
+        groups.append("dual_peak_strong")
+    return groups
+
+
 def classify(metrics: dict[str, Any]) -> dict[str, Any]:
     results: dict[str, dict[str, Any]] = {}
 
@@ -215,32 +303,67 @@ def classify(metrics: dict[str, Any]) -> dict[str, Any]:
             "qualified": len(hits) >= config["minimum_hits"],
         }
 
-    # Decisive override: a real harsh spike outranks every other signal —
-    # de-essing the spike is always the priority when one exists.
-    if metrics["peakiness_harsh"] >= DECISIVE_HARSH_PEAK_DB:
+    # B's evidence is judged by independent groups rather than by rule count,
+    # so a single sibilant spike can no longer masquerade as a broad HF problem.
+    b_groups = b_evidence_groups(metrics)
+    b_qualifies = len(b_groups) >= 2
+    b_is_strong = len(b_groups) >= 3 or "dual_peak_strong" in b_groups
+
+    a_qualified = results["template_A"]["qualified"]
+    c_qualified = results["template_C"]["qualified"]
+
+    label: str
+    reason: str
+    fallback = False
+    secondary: list[str] = []
+
+    if c_qualified and not (b_qualifies and b_is_strong):
+        # C outranks B unless B has genuinely multi-source evidence: a
+        # body-dominant, presence-starved mix needs its structure fixed first,
+        # and a lone harsh peak must never overturn it.
+        label = "template_C"
+        reason = "qualified C structure takes priority over non-strong B evidence"
+        if b_qualifies:
+            secondary.append("hf_harshness")
+    elif c_qualified and b_qualifies and b_is_strong:
         label = "template_B"
+        reason = "strong multi-group B evidence competes with C structure"
+        secondary.append("body_heavy_structure")
+    elif b_qualifies and b_is_strong:
+        label = "template_B"
+        reason = "strong multi-group B evidence"
+        if a_qualified:
+            secondary.append("muddy_body")
+    elif a_qualified:
+        # A plain B alongside A stays a secondary issue: the existing dynamic
+        # de-esser / HF guard handles it without a fixed EQ cut on top.
+        label = "template_A"
+        reason = "qualified A; non-strong B (if any) handled as secondary issue"
+        if b_qualifies:
+            secondary.append("hf_harshness")
+    elif b_qualifies:
+        label = "template_B"
+        reason = "B is the only qualified template"
     else:
-        # Equal-priority three-way selection.
-        # 1. If exactly one template has any strong_hits, that "smoking gun"
-        #    template wins.
-        # 2. Otherwise rank by (hits, strong_hits); ties break A > B > C.
-        candidates = ["template_A", "template_B", "template_C"]
-        with_strong = [t for t in candidates if results[t]["strong_hits"] > 0]
-        if len(with_strong) == 1:
-            label = with_strong[0]
-        else:
-            label = max(
-                candidates,
-                key=lambda t: (
-                    results[t]["hits"],
-                    results[t]["strong_hits"],
-                    -candidates.index(t),
-                ),
-            )
+        label = "template_A"
+        reason = "no template qualified; falling back to the maintained A chain"
+        fallback = True
+
+    if fallback:
+        confidence = "low"
+    elif results[label].get("strong_rules") or b_is_strong:
+        confidence = "high"
+    else:
+        confidence = "medium"
 
     return {
         "label": label,
         "label_name": results[label]["name"] if label in results else None,
+        "selection_reason": reason,
+        "fallback": fallback,
+        "confidence": confidence,
+        "secondary_issues": secondary,
+        "b_evidence_groups": b_groups,
         "template_A": results["template_A"],
         "template_B": results["template_B"],
         "template_C": results["template_C"],
@@ -342,6 +465,16 @@ def analyze_audio(
     if "sib" not in active_bands or _band_is_empty(*active_bands.get("sib", BANDS["sib"])):
         peakiness_sib = 0.0
 
+    # upper 频段谱平坦度：电音/金属环 -> 低（能量被窄尖峰霸占）；干净人声 -> 高。
+    # 用线性 mean_power（不是 dB），因为 flatness 定义在线性功率谱上。空频段同样
+    # 跳过，返回 1.0（“最平坦/无电音”），避免空频段被误判成电音。
+    if "upper" in active_bands and not _band_is_empty(*active_bands.get("upper", BANDS["upper"])):
+        flatness_upper = band_spectral_flatness(
+            mean_power, freqs, *active_bands.get("upper", BANDS["upper"])
+        )
+    else:
+        flatness_upper = 1.0
+
     metrics: dict[str, Any] = {
         "audio_path": str(path),
         "sample_rate": used_sr,
@@ -359,6 +492,8 @@ def analyze_audio(
         "peakiness_upper": peakiness_upper,
         "peakiness_harsh": peakiness_harsh,
         "peakiness_sib": peakiness_sib,
+        # upper 谱平坦度（0~1）：低=电音/金属环，高=干净/闷糊人声。
+        "flatness_upper": flatness_upper,
     }
     metrics["classification"] = classify(metrics)
     return metrics
